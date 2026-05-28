@@ -44,17 +44,21 @@ def save_cookie():
         json.dump({"refresh_token": current_refresh_token, "cookie_part0": cookie_part0, "cookie_part1": cookie_part1}, f)
 
 def extract_refresh_from_full_cookie(raw_cookie):
-    """Extrae el refresh_token del cookie base64 completo"""
+    """Extrae el refresh_token del cookie base64 completo (partes .0 y .1)"""
     try:
-        # Buscar el bloque base64: base64-XXXX
-        match = re.search(r'base64-([A-Za-z0-9+/=_.-]+)', raw_cookie)
-        if match:
-            b64 = match.group(1)
-            padded = b64 + '=' * (4 - len(b64) % 4) if len(b64) % 4 else b64
-            decoded = base64.urlsafe_b64decode(padded).decode('utf-8')
+        # Buscar la parte .0 (tiene prefijo base64-)
+        match0 = re.search(r'\.0=base64-([A-Za-z0-9+/=_.\-]+)', raw_cookie)
+        # Buscar la parte .1 (continuacion, sin prefijo)
+        match1 = re.search(r'\.1=([A-Za-z0-9+/=_.\-]+)', raw_cookie)
+        if match0:
+            part0 = match0.group(1)
+            part1 = match1.group(1) if match1 else ""
+            combined = part0 + part1
+            # Decodificar base64
+            padding = '=' * (4 - len(combined) % 4) if len(combined) % 4 else ''
+            decoded = base64.urlsafe_b64decode(combined + padding).decode('utf-8')
             data = json.loads(decoded)
             rt = data.get("refresh_token", "")
-            # Tambien puede estar anidado
             if not rt and "user" in data and isinstance(data["user"], dict):
                 rt = data["user"].get("refresh_token", "")
             return rt
