@@ -69,7 +69,8 @@ def refresh_session():
     """Renovar el access token de Supabase usando refresh_token"""
     global current_access_token, current_cookie, current_refresh_token, ready, cookie_part0, cookie_part1
     if not current_refresh_token:
-        ready = False
+        if not cookie_part0 or not cookie_part1:
+            ready = False
         return False
     try:
         headers = {"apikey": ANON_KEY, "Authorization": f"Bearer {ANON_KEY}", "Content-Type": "application/json"}
@@ -101,11 +102,9 @@ def refresh_session():
             print(f"[OK] Token renovado: {current_access_token[:30]}...")
             return True
         else:
-            ready = False
             print(f"[ERROR] Refresh: {r.status_code} {r.text[:100]}")
             return False
     except Exception as e:
-        ready = False
         print(f"[ERROR] Refresh: {e}")
         return False
 
@@ -118,9 +117,16 @@ def reset_counter():
         http.patch(uri, headers=headers, json={"analyses_count": -999}, timeout=10)
     except: pass
 
-# Cargar cookie guardada e iniciar sesion
+# Cargar cookie guardada
 if load_cookie():
+    # Si tenemos cookie_parts guardados, usarlos directamente
+    if cookie_part0 and cookie_part1:
+        ready = True
+        print("[OK] Cookie cargada desde archivo")
+    # Intentar refrescar el token
     refresh_session()
+else:
+    ready = False
 
 # Loop de auto-refresh
 def auto_refresh_loop():
