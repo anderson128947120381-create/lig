@@ -98,6 +98,7 @@ def refresh_session():
             current_cookie = "sb-eptdvpvwspuykrcnxcqt-auth-token.0=" + cookie_part0 + "; sb-eptdvpvwspuykrcnxcqt-auth-token.1=" + cookie_part1
 
             save_cookie()
+            save_to_supabase()
             ready = True
             print(f"[OK] Token renovado: {current_access_token[:30]}...")
             return True
@@ -128,11 +129,80 @@ if load_cookie():
 else:
     ready = False
 
-# Loop de auto-refresh
+SUPABASE_STATE_ID = "server_state_persist"
+
+def save_to_supabase():
+    """Guardar estado de cookie en Supabase para persistencia"""
+    try:
+        payload = json.dumps({"rt": current_refresh_token, "p0": cookie_part0, "p1": cookie_part1})
+        uri = f"{SUPABASE_URL}/rest/v1/usage_tracking?device_id=eq.{SUPABASE_STATE_ID}"
+        headers = {"apikey": ANON_KEY, "Authorization": f"Bearer {ANON_KEY}", "Content-Type": "application/json", "Prefer": "return=minimal"}
+        # Intentar PATCH (actualizar existente)
+        r = http.patch(uri, headers=headers, json={"user_id": USER_ID, "date": "3000-01-01", "analyses_count": 0, "device_id": SUPABASE_STATE_ID, "mobile_user_id": payload}, timeout=10)
+        if r.status_code not in (200, 204):
+            # Si no existe, crear con POST
+            r2 = http.post(f"{SUPABASE_URL}/rest/v1/usage_tracking", headers=headers, json={"user_id": USER_ID, "date": "3000-01-01", "analyses_count": 0, "device_id": SUPABASE_STATE_ID, "mobile_user_id": payload}, timeout=10)
+    except Exception as e:
+        print(f"[WARN] Supabase persist: {e}")
+
+def load_from_supabase():
+    """Cargar estado de cookie desde Supabase (fallback si archivo local falla)"""
+    global cookie_part0, cookie_part1, current_refresh_token, current_cookie, current_access_token, ready
+    try:
+        uri = f"{SUPABASE_URL}/rest/v1/usage_tracking?select=mobile_user_id&device_id=eq.{SUPABASE_STATE_ID}&limit=1"
+        headers = {"apikey": ANON_KEY, "Authorization": f"Bearer {ANON_KEY}"}
+        r = http.get(uri, headers=headers, timeout=10)
+        if r.status_code == 200:
+            rows = r.json()
+            if rows and rows[0].get("mobile_user_id"):
+                data = json.loads(rows[0]["mobile_user_id"])
+                current_refresh_token = data.get("rt", "")
+                cookie_part0 = data.get("p0", "")
+                cookie_part1 = data.get("p1", "")
+                if cookie_part0 and cookie_part1:
+                    current_cookie = "sb-eptdvpvwspuykrcnxcqt-auth-token.0=" + cookie_part0 + "; sb-eptdvpvwspuykrcnxcqt-auth-token.1=" + cookie_part1
+                    # Intentar refresh con este token
+                    if refresh_session():
+                        save_cookie()
+                        print("[OK] Estado recuperado de Supabase")
+                        return True
+    except Exception as e:
+        print(f"[WARN] Supabase load: {e}")
+    return False
+
+# Cargar cookie guardada
+loaded = load_cookie()
+if loaded:
+    if cookie_part0 and cookie_part1:
+        ready = True
+        print("[OK] Cookie cargada desde archivo")
+    refreshed = refresh_session()
+    if not refreshed and not ready:
+        # Archivo local no sirvio, intentar Supabase
+        if load_from_supabase():
+            ready = True
+elif not load_from_supabase():
+    ready = False
+
+# Agresivo: reintentar refresh cada 60s los primeros 5 min si no esta ready
+def startup_retry():
+    global ready
+    for i in range(5):
+        if ready:
+            break
+        time.sleep(60)
+        print(f"[RETRY] Intentando refresh #{i+1}...")
+        if refresh_session() or load_from_supabase():
+            ready = True
+            break
+threading.Thread(target=startup_retry, daemon=True).start()
+
+# Loop de auto-refresh cada 30 minutos
 def auto_refresh_loop():
     while True:
-        time.sleep(3000)
+        time.sleep(1800)
         refresh_session()
+        save_to_supabase()
 threading.Thread(target=auto_refresh_loop, daemon=True).start()
 
 HTML = r"""<!DOCTYPE html>
@@ -216,7 +286,16 @@ img.preview{max-width:100%;max-height:220px;margin-top:10px;border-radius:12px;d
   <div class="footer" id="statusMsg">Conectando...</div>
 </div>
 
+<div id="renewBox" style="display:none; position:fixed; bottom:0; left:0; right:0; background:#fff; border-top:2px solid #e53e3e; padding:20px; z-index:99999; text-align:center; box-shadow:0 -4px 20px rgba(0,0,0,0.1)">
+  <p style="color:#e53e3e; font-weight:600; margin-bottom:8px">Sesion expirada</p>
+  <p style="font-size:12px; color:#666; margin-bottom:12px">El servidor se reinicio. Pega una cookie nueva (F12 en Liggo, <code>document.cookie</code>)</p>
+  <textarea id="renewCookie" style="width:90%;padding:8px;border:1.5px solid #e53e3e;border-radius:8px;font-size:11px;font-family:monospace;min-height:50px;margin-bottom:8px" placeholder="Pega el cookie aqui..."></textarea>
+  <button id="renewBtn" style="padding:10px 30px;background:#6366f1;color:#fff;border:none;border-radius:8px;font-size:14px;font-weight:600;cursor:pointer">Renovar sesion</button>
+</div>
+
 <script>
+const renewBox=document.getElementById('renewBox'),renewCookie=document.getElementById('renewCookie'),
+renewBtn=document.getElementById('renewBtn');
 const configBox=document.getElementById('configBox'),cookieInput=document.getElementById('cookieInput'),
 saveBtn=document.getElementById('saveCookieBtn'),statusMsg=document.getElementById('statusMsg'),
 fileInput=document.getElementById('file'),preview=document.getElementById('preview'),
@@ -228,7 +307,7 @@ metaEl=document.getElementById('meta'),main=document.getElementById('mainContent
 async function checkStatus(){
   try{
     const r=await fetch('/api/status');const d=await r.json();
-    if(d.ready){configBox.style.display='none';main.style.display='block';statusMsg.textContent='✅ Sesion activa - Gemini listo'}
+    if(d.ready){configBox.style.display='none';main.style.display='block';renewBox.style.display='none';statusMsg.textContent='✅ Sesion activa - Gemini listo'}
     else{configBox.style.display='block';main.style.display='none';statusMsg.textContent='⚠️ Configura la cookie para empezar'+(d.error?' - '+d.error:'')}
   }catch(e){statusMsg.textContent='Error de conexion: '+e.message}
 }
@@ -240,9 +319,20 @@ saveBtn.addEventListener('click',async function(){
   try{
     const r=await fetch('/api/set-cookie',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({cookie:val})});
     const d=await r.json();
-    if(d.ok){statusMsg.textContent='✅ Cookie guardada';checkStatus()}
+    if(d.ok){statusMsg.textContent='✅ Cookie guardada';checkStatus();renewBox.style.display='none'}
     else{alert('Error: '+d.error);saveBtn.textContent='Guardar cookie';saveBtn.disabled=false}
   }catch(e){alert('Error: '+e.message);saveBtn.textContent='Guardar cookie';saveBtn.disabled=false}
+});
+
+renewBtn.addEventListener('click',async function(){
+  const val=renewCookie.value.trim();if(!val){alert('Pega la cookie primero');return}
+  renewBtn.textContent='Renovando...';renewBtn.disabled=true;
+  try{
+    const r=await fetch('/api/set-cookie',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({cookie:val})});
+    const d=await r.json();
+    if(d.ok){statusMsg.textContent='✅ Sesion renovada';renewBox.style.display='none';checkStatus()}
+    else{alert('Error: '+d.error);renewBtn.textContent='Renovar sesion';renewBtn.disabled=false}
+  }catch(e){alert('Error: '+e.message);renewBtn.textContent='Renovar sesion';renewBtn.disabled=false}
 });
 
 fileInput.addEventListener('change',function(){
@@ -265,7 +355,7 @@ btn.addEventListener('click',async function(){
         metaEl.textContent=d.extractedText;
       }else{
         respEl.textContent='Error: '+(d.error||'Desconocido');respEl.className='resp error';
-        if(d.error==='Usuario no autenticado'){statusMsg.textContent='⚠️ Sesion expirada, actualiza la cookie';checkStatus()}
+        if(d.error==='Usuario no autenticado'){statusMsg.textContent='⚠️ Sesion expirada - scroll down para renovar';renewBox.style.display='block';checkStatus()}
       }
     }catch(err){
       resultDiv.style.display='block';respEl.textContent='Error de conexion: '+err.message;respEl.className='resp error';
@@ -306,9 +396,11 @@ def set_cookie():
     current_refresh_token = rt
     save_cookie()
     if refresh_session():
+        save_to_supabase()
         return {'ok': True}
     # Si falla refresh, usar el cookie del usuario directamente
     ready = True
+    save_to_supabase()
     return {'ok': True}
 
 @app.route('/api/proxy', methods=['POST', 'OPTIONS'])
